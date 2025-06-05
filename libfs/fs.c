@@ -296,6 +296,9 @@ int fs_create(const char *filename)
 		return -1; // Failed to write back to root directory
 	}
 
+	// Update in-memory root directory table
+	memcpy(&rd_table[empty_slot], target_entry_ptr, RDIR_ENTRY_SIZE);
+
 	return 0; // File created successfully
 }
 
@@ -465,8 +468,6 @@ int fs_ls(void)
 /* Open file by giving it a file descriptor */
 int fs_open(const char *filename)
 {
-	// FS_OPEN_MAX_COUNT 32
-
 	// Check if disk is mounted
 	if (is_mounted == 0)
 	{
@@ -479,11 +480,27 @@ int fs_open(const char *filename)
 		return -1;
 	}
 
+	// Read root directory to get latest state
+	uint8_t root_dir_block[BLOCK_SIZE];
+	if (block_read(sb.root_index, root_dir_block) == -1)
+	{
+		return -1;
+	}
+
 	// Iterate through root directory, stop if there is a match
 	int rd_index = -1;
 	for (int i = 0; i < FS_FILE_MAX_COUNT; i++)
 	{
-		if (strcmp(rd_table[i].filename, filename) == 0)
+		uint8_t *entry_ptr = root_dir_block + (i * RDIR_ENTRY_SIZE);
+		
+		// Skip empty entries
+		if (entry_ptr[FILENAME_OFFSET] == '\0')
+		{
+			continue;
+		}
+
+		// Compare filenames
+		if (strncmp((char *)(entry_ptr + FILENAME_OFFSET), filename, FS_FILENAME_LEN) == 0)
 		{
 			rd_index = i;
 			break;
@@ -766,6 +783,8 @@ int fs_write(int fd, void *buf, size_t count)
 		{
 			return -1;
 		}
+		// Update in-memory root directory table
+		rd_table[fd_table[fd].entry_index].size = new_file_size;
 	}
 
 	// Update file offset
