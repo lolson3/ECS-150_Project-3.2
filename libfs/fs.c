@@ -18,9 +18,29 @@ typedef struct __attribute__((packed)) superblock {
 	uint8_t  padding[4079]; // Offset 0x11, unused space
 } superblock_t;
 
+/* Struct containing file descriptor info */
+typedef struct file_descriptor {
+    int active; // 0 or 1
+    int entry_index; // Root directory entry index
+    uint32_t offset; // Current read/write position 
+}file_descriptor_t;
+
+/* Struct containing root directory entry info */
+typedef struct __attribute__((packed)) rd_entry{
+    char filename[16];
+    uint32_t size;
+    uint16_t index;
+    uint8_t padding[10];
+} rd_entry_t;
+
 // Global instances of superblock for this disk, and count to see if it is mounted
 static superblock_t sb;
 static int is_mounted = 0;
+
+// Gloibal instance of file descriptor table and root directory table
+static file_descriptor_t fd_table[FS_OPEN_MAX_COUNT];
+static rd_entry_t rd_table[FS_FILE_MAX_COUNT];
+
 
 /* Mounts a specified filesystem */
 int fs_mount(const char *diskname)
@@ -45,6 +65,11 @@ int fs_mount(const char *diskname)
 		return -1;
 	}
 
+	// Load root directory
+	if (block_read(sb.root_index, rd_table) < 0) {
+   		return -1;
+	}
+
 	// Mark disk as mounted
 	is_mounted = 1;
 
@@ -56,6 +81,11 @@ int fs_umount(void)
 {
 	// Check if disk is mounted
 	if (is_mounted == 0) {
+		return -1;
+	}
+
+	// Write back root directory
+    if (block_write(sb.root_index, rd_table) < 0) {
 		return -1;
 	}
 
@@ -128,6 +158,7 @@ int fs_info(void)
 int fs_create(const char *filename)
 {
 	/* TODO: Phase 2 */
+
 }
 
 int fs_delete(const char *filename)
@@ -140,24 +171,126 @@ int fs_ls(void)
 	/* TODO: Phase 2 */
 }
 
+/* Open file by giving it a file descriptor */
 int fs_open(const char *filename)
 {
-	/* TODO: Phase 3 */
+	// FS_OPEN_MAX_COUNT 32
+
+	// Check if disk is mounted
+	if (is_mounted == 0) {
+		return -1;
+	}
+
+	// Check filename is valid
+	if (filename == NULL || strlen(filename) > 15) {
+		return -1;
+	}
+
+	// Iterate through root directory, stop if there is a match
+	int rd_index = -1;
+	for (int i = 0; i < FS_FILE_MAX_COUNT; i++) {
+		if (strcmp(rd_table[i].filename, filename) == 0) {
+			rd_index = i;
+			break;
+		}
+	}
+
+	// Check to see if rd_index has been changed. If not, file wasn't found.
+	if (rd_index == -1) {
+    	return -1; 
+	}
+	
+	// Find inactive file descriptor and use it
+	int fd = -1;
+	for (int i = 0; i < FS_OPEN_MAX_COUNT; i++) {
+		if (fd_table[i].active == 0) {
+			fd_table[i].active = 1;
+			fd_table[i].entry_index = rd_index;
+			fd_table[i].offset = 0;
+			fd = i;
+			break;
+		}
+	}
+
+	// Check to see if no file descriptor was found
+	if (fd == -1) {
+   		return -1;
+	}
+
+	return fd;
 }
 
+/* Close file descriptor */
 int fs_close(int fd)
 {
-	/* TODO: Phase 3 */
+	if (is_mounted == 0) {
+		return -1;
+	}
+
+	if (fd < 0 || fd >= FS_OPEN_MAX_COUNT) {
+		return -1;
+	}
+
+	// If file descriptor is active, reset it
+	if (fd_table[fd].active != 0) {
+		fd_table[fd].entry_index = -1;
+		fd_table[fd].offset = 0;
+		fd_table[fd].active = 0;
+	} else {
+		return -1;
+	}
+
+	return 0;
 }
 
+/* Get size of a file */
 int fs_stat(int fd)
 {
-	/* TODO: Phase 3 */
+	if (is_mounted == 0) {
+		return -1;
+	}
+
+	if (fd < 0 || fd >= FS_OPEN_MAX_COUNT) {
+		return -1;
+	}
+
+	if (fd_table[fd].active == 0) {
+		return -1;
+	}
+
+	// Get entry and return the size found in the root directory
+	int entry = fd_table[fd].entry_index;
+    return rd_table[entry].size;
 }
 
+/* Change read/write position in file */
 int fs_lseek(int fd, size_t offset)
 {
-	/* TODO: Phase 3 */
+	// General error checking
+	if (is_mounted == 0) {
+		return -1;
+	}
+	
+	if (fd < 0 || fd >= FS_OPEN_MAX_COUNT) {
+		return -1;
+	}
+
+	if (fd_table[fd].active == 0) {
+		return -1;
+	}
+
+	// Get entry index in file descriptor table
+	int entry = fd_table[fd].entry_index;
+
+	// Check for offset exceeding sizes of file
+	if (offset > root_dir[entry].size) {
+		return -1;
+	}
+
+	// Set new offset
+	fd_table[fd].offset = offset;
+
+	return 0;
 }
 
 int fs_write(int fd, void *buf, size_t count)
