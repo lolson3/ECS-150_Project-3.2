@@ -365,7 +365,7 @@ int fs_open(const char *filename)
 	if (!is_mounted)
 		return -1;
 
-	// Validate filename
+	// Check if filename is valid
 	if (filename == NULL || strlen(filename) == 0 || strlen(filename) >= FS_FILENAME_LEN)
 		return -1;
 
@@ -488,26 +488,31 @@ int fs_lseek(int fd, size_t offset)
 /* Write to file */
 int fs_write(int fd, void *buf, size_t count)
 {
-	// Input validation
-	if (!is_mounted || !buf)
+	// Check if disk is mounted and buffer exists
+	if (!is_mounted || !buf) {
 		return -1;
+	}
 
-	if (fd < 0 || fd >= FS_OPEN_MAX_COUNT || !fd_table[fd].active)
+	// Check if file descriptor is active and valid
+	if (fd < 0 || fd >= FS_OPEN_MAX_COUNT || !fd_table[fd].active) {
 		return -1;
+	}
 
+	// Initialize variables for entry index, file size, and current offset
 	int entry_index = fd_table[fd].entry_index;
 	uint32_t file_size = rd_table[entry_index].size;
 	uint32_t current_offset = fd_table[fd].offset;
 
-	// Don't allow writing beyond maximum file size (optional, depending on your spec)
-	if (current_offset + count > BLOCK_SIZE * sb.datablock_count)
+	// Check if offset exceeds maximum file size
+	if (current_offset + count > BLOCK_SIZE * sb.datablock_count) {
 		count = BLOCK_SIZE * sb.datablock_count - current_offset;
+	}
 
 	// Calculate how many bytes we can actually write
 	if (count == 0)
 		return 0;
 
-	// Walk FAT chain to current block (or allocate blocks as needed)
+	// Get the current block of data from the root directory
 	uint16_t current_block = rd_table[entry_index].index;
 
 	// If file has no blocks yet, allocate the first block
@@ -524,8 +529,10 @@ int fs_write(int fd, void *buf, size_t count)
 			}
 		}
 
-		if (new_block == -1)
-			return 0; // Disk full
+		// Check if disk is full
+		if (new_block == -1) {
+			return 0;
+		}
 
 		// Allocate new block
 		fat_buffer[new_block] = FAT_EOC;
@@ -552,8 +559,9 @@ int fs_write(int fd, void *buf, size_t count)
 				}
 			}
 
-			if (new_block == -1)
+			if (new_block == -1) {
 				return i * BLOCK_SIZE; // Partial write if disk full
+			}
 
 			fat_buffer[current_block] = new_block;
 			fat_buffer[new_block] = FAT_EOC;
@@ -562,15 +570,16 @@ int fs_write(int fd, void *buf, size_t count)
 		current_block = fat_buffer[current_block];
 	}
 
-	// Now perform the actual writing
+	// Initialize variables for written bytes and a buffer for each block
 	size_t bytes_written = 0;
 	uint8_t block_buf[BLOCK_SIZE];
 
 	while (bytes_written < count)
 	{
 		// Read current block
-		if (block_read(sb.start_index + current_block, block_buf) == -1)
+		if (block_read(sb.start_index + current_block, block_buf) == -1) {
 			break;
+		}
 
 		// Calculate how much to write into this block
 		size_t block_space = BLOCK_SIZE - offset_in_block;
@@ -578,15 +587,17 @@ int fs_write(int fd, void *buf, size_t count)
 
 		memcpy(block_buf + offset_in_block, (uint8_t *)buf + bytes_written, write_now);
 
-		if (block_write(sb.start_index + current_block, block_buf) == -1)
+		if (block_write(sb.start_index + current_block, block_buf) == -1) {
 			break;
+		}
 
+		// Increments the count for number of bytes written
 		bytes_written += write_now;
 		offset_in_block = 0;
 
 		if (bytes_written < count)
 		{
-			// Need to move to next block
+			// Moves to next block if necessary
 			if (fat_buffer[current_block] == FAT_EOC)
 			{
 				// Allocate new block
@@ -615,8 +626,9 @@ int fs_write(int fd, void *buf, size_t count)
 	fd_table[fd].offset += bytes_written;
 
 	// Update file size if needed
-	if (fd_table[fd].offset > file_size)
+	if (fd_table[fd].offset > file_size) {
 		rd_table[entry_index].size = fd_table[fd].offset;
+	}
 
 	return bytes_written;
 }
@@ -625,13 +637,13 @@ int fs_write(int fd, void *buf, size_t count)
 /* Read from file */
 int fs_read(int fd, void *buf, size_t count)
 {
-	// Input validation
+	// Check if disk is mounted and buffer is valid
 	if (!is_mounted || !buf)
 	{
 		return -1;
 	}
 
-	// Validate file descriptor
+	// Check if file descriptor is active and valid
 	if (fd < 0 || fd >= FS_OPEN_MAX_COUNT || !fd_table[fd].active)
 	{
 		return -1;
