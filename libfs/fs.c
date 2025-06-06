@@ -40,9 +40,12 @@ typedef struct __attribute__((packed)) rd_entry
 static superblock_t sb;
 static int is_mounted = 0;
 
-// Gloibal instance of file descriptor table and root directory table
+// Global instance of file descriptor table and root directory table
 static file_descriptor_t fd_table[FS_OPEN_MAX_COUNT];
 static rd_entry_t rd_table[FS_FILE_MAX_COUNT];
+
+// Global instance of fat buffer
+static uint16_t *fat_buffer = NULL;
 
 #define FAT_EOC 0xFFFF	   // End of chain marker for FAT
 #define RDIR_ENTRY_SIZE 32 // Size of each root directory entry
@@ -53,49 +56,49 @@ static rd_entry_t rd_table[FS_FILE_MAX_COUNT];
 #define FIRST_BLOCK_OFFSET 20
 
 // Helper function to read a 16-bit little-endian value from a byte buffer
-static uint16_t read_le16(const uint8_t *buffer)
-{
-	return (uint16_t)buffer[0] | ((uint16_t)buffer[1] << 8);
-}
+// static uint16_t read_le16(const uint8_t *buffer)
+// {
+// 	return (uint16_t)buffer[0] | ((uint16_t)buffer[1] << 8);
+// }
 
-// Helper function to write a 16-bit value to a byte buffer in little-endian
-static void write_le16(uint8_t *buffer, uint16_t value)
-{
-	buffer[0] = (uint8_t)(value & 0xFF);
-	buffer[1] = (uint8_t)((value >> 8) & 0xFF);
-}
+// // Helper function to write a 16-bit value to a byte buffer in little-endian
+// static void write_le16(uint8_t *buffer, uint16_t value)
+// {
+// 	buffer[0] = (uint8_t)(value & 0xFF);
+// 	buffer[1] = (uint8_t)((value >> 8) & 0xFF);
+// }
 
 // Helper function to read a 32-bit little-endian value from a byte buffer
-static uint32_t read_le32(const uint8_t *buffer)
-{
-	return (uint32_t)buffer[0] |
-		   ((uint32_t)buffer[1] << 8) |
-		   ((uint32_t)buffer[2] << 16) |
-		   ((uint32_t)buffer[3] << 24);
-}
-// Helper function to write a 32-bit value to a byte buffer in little-endian
-static void write_le32(uint8_t *buffer, uint32_t value)
-{
-	buffer[0] = (uint8_t)(value & 0xFF);
-	buffer[1] = (uint8_t)((value >> 8) & 0xFF);
-	buffer[2] = (uint8_t)((value >> 16) & 0xFF);
-	buffer[3] = (uint8_t)((value >> 24) & 0xFF);
-}
+// static uint32_t read_le32(const uint8_t *buffer)
+// {
+// 	return (uint32_t)buffer[0] |
+// 		   ((uint32_t)buffer[1] << 8) |
+// 		   ((uint32_t)buffer[2] << 16) |
+// 		   ((uint32_t)buffer[3] << 24);
+// }
+// // Helper function to write a 32-bit value to a byte buffer in little-endian
+// static void write_le32(uint8_t *buffer, uint32_t value)
+// {
+// 	buffer[0] = (uint8_t)(value & 0xFF);
+// 	buffer[1] = (uint8_t)((value >> 8) & 0xFF);
+// 	buffer[2] = (uint8_t)((value >> 16) & 0xFF);
+// 	buffer[3] = (uint8_t)((value >> 24) & 0xFF);
+// }
 
 // Helper to get a FAT entry from the in-memory FAT buffer
-static uint16_t get_fat_entry_from_buffer(const uint8_t *fat_main_buffer, uint16_t index)
-{
-	// Each FAT entry is 2 bytes
-	const uint8_t *p = fat_main_buffer + (index * 2);
-	return read_le16(p);
-}
+// static uint16_t get_fat_entry_from_buffer(const uint8_t *fat_main_buffer, uint16_t index)
+// {
+// 	// Each FAT entry is 2 bytes
+// 	const uint8_t *p = fat_main_buffer + (index * 2);
+// 	return read_le16(p);
+// }
 
-// Helper to set a FAT entry in the in-memory FAT buffer
-static void set_fat_entry_in_buffer(uint8_t *fat_main_buffer, uint16_t index, uint16_t value)
-{
-	uint8_t *p = fat_main_buffer + (index * 2);
-	write_le16(p, value);
-}
+// // Helper to set a FAT entry in the in-memory FAT buffer
+// static void set_fat_entry_in_buffer(uint8_t *fat_main_buffer, uint16_t index, uint16_t value)
+// {
+// 	uint8_t *p = fat_main_buffer + (index * 2);
+// 	write_le16(p, value);
+// }
 
 /* Mounts a specified filesystem */
 int fs_mount(const char *diskname)
@@ -130,6 +133,19 @@ int fs_mount(const char *diskname)
 		return -1;
 	}
 
+	// Set size of fat buffer
+	fat_buffer = malloc(sb.datablock_count * sizeof(uint16_t));
+	if (fat_buffer == NULL) {
+		return -1;
+	}
+
+	// Load FAT from disk into fat_buffer
+	for (int i = 0; i < sb.fat_blocks; i++) {
+		if (block_read(1 + i, (void *)(((uint8_t *)fat_buffer) + (i * BLOCK_SIZE))) < 0) {
+			return -1;
+		}
+	}
+
 	// Mark disk as mounted
 	is_mounted = 1;
 
@@ -157,6 +173,11 @@ int fs_umount(void)
 		return -1;
 	}
 
+	// Free memory used for fat buffer
+	free(fat_buffer);
+	fat_buffer = NULL;
+
+
 	// Mark disk as unmounted
 	is_mounted = 0;
 
@@ -170,7 +191,6 @@ int fs_info(void)
 	int fat_free = 0;
 	uint16_t fat_entry;
 
-	uint8_t rdir_buf[BLOCK_SIZE];
 	int rdir_free = 0;
 
 	if (is_mounted == 0)
@@ -199,16 +219,9 @@ int fs_info(void)
 		}
 	}
 
-	// Calculates number of free root directory spaces
-	if (block_read(sb.root_index, rdir_buf) < 0)
-	{
-		return -1;
-	}
-
-	for (int i = 0; i < FS_FILE_MAX_COUNT; i++)
-	{
-		if (rdir_buf[i * 32] == '\0')
-		{
+	// Calculates the number of free root directory spaces
+	for (int i = 0; i < FS_FILE_MAX_COUNT; i++) {
+		if (rd_table[i].filename[0] == '\0') {
 			rdir_free++;
 		}
 	}
@@ -234,186 +247,103 @@ int fs_create(const char *filename)
 		return -1;
 	}
 
-	// Buffer to hold the root directory block
-	uint8_t root_dir_block[BLOCK_SIZE];
-
-	// Read the root directory block
-	if (block_read(sb.root_index, root_dir_block) == -1)
-	{
-		return -1;
-	}
+	// Checks for duplicate filename
+    for (int i = 0; i < FS_FILE_MAX_COUNT; i++) {
+        if (strcmp(rd_table[i].filename, filename) == 0)
+            return -1;
+    }
 
 	// Loop through the root directory entries to find an empty slot or check for existing filename
-	int empty_slot = -1;
-	for (int i = 0; i < FS_FILE_MAX_COUNT; i++)
-	{
-		uint8_t *entry_ptr = root_dir_block + (i * RDIR_ENTRY_SIZE);
+	int free_entry = -1;
+    for (int i = 0; i < FS_FILE_MAX_COUNT; i++) {
+        if (rd_table[i].filename[0] == '\0') {
+            free_entry = i;
+            break;
+        }
+    }
 
-		// Check if filename is already taken and not empty
-		if (entry_ptr[FILENAME_OFFSET] != '\0')
-		{
-			if (strncmp((char *)(entry_ptr + FILENAME_OFFSET), filename, FS_FILENAME_LEN) == 0)
-			{
-				return -1; // File already exists
-			}
-		}
-		else
-		{
-			if (empty_slot == -1)
-			{
-				empty_slot = i; // Found an empty slot
-			}
-		}
+	// Error checking for 0 free entries
+	if (free_entry == -1) {
+        return -1;
 	}
 
-	if (empty_slot == -1)
-	{
-		return -1; // No empty slot found
-	}
+	// Set values in root directory for new file
+    strncpy(rd_table[free_entry].filename, filename, FS_FILENAME_LEN);
+    rd_table[free_entry].filename[FS_FILENAME_LEN - 1] = '\0';
+    rd_table[free_entry].size = 0;
+    rd_table[free_entry].index = FAT_EOC;
+    memset(rd_table[free_entry].padding, 0, sizeof(rd_table[free_entry].padding));
 
-	// get a pointer to the start of the empty slot
-	uint8_t *target_entry_ptr = root_dir_block + (empty_slot * RDIR_ENTRY_SIZE);
+	// Ensures updated root directory in memory matches root directory in storage
+    if (block_write(sb.root_index, rd_table) < 0)
+        return -1;
 
-	strncpy((char *)(target_entry_ptr + FILENAME_OFFSET), filename, FS_FILENAME_LEN);
-
-	if (strlen(filename) < FS_FILENAME_LEN - 1)
-	{
-		target_entry_ptr[FILENAME_OFFSET + FS_FILENAME_LEN - 1] = '\0';
-	}
-
-	uint16_t file_size = 0;
-	target_entry_ptr[FILESIZE_OFFSET + 0] = (uint8_t)(file_size & 0xFF);
-	target_entry_ptr[FILESIZE_OFFSET + 1] = (uint8_t)((file_size >> 8) & 0xFF);
-	target_entry_ptr[FILESIZE_OFFSET + 2] = (uint8_t)((file_size >> 16) & 0xFF);
-	target_entry_ptr[FILESIZE_OFFSET + 3] = (uint8_t)((file_size >> 24) & 0xFF);
-
-	uint16_t first_block = FAT_EOC;
-	target_entry_ptr[FIRST_BLOCK_OFFSET + 0] = (uint8_t)(first_block & 0xFF);
-	target_entry_ptr[FIRST_BLOCK_OFFSET + 1] = (uint8_t)((first_block >> 8) & 0xFF);
-
-	if (block_write(sb.root_index, root_dir_block) == -1)
-	{
-		return -1; // Failed to write back to root directory
-	}
-
-	// Update in-memory root directory table
-	memcpy(&rd_table[empty_slot], target_entry_ptr, RDIR_ENTRY_SIZE);
-
-	return 0; // File created successfully
+    return 0;
 }
 
 /* Delete a file with the given filename */
 int fs_delete(const char *filename)
 {
+	// Check if filesystem is mounted and filename is valid
 	if (!is_mounted || filename == NULL || strlen(filename) == 0 || strlen(filename) >= FS_FILENAME_LEN)
 	{
-		return -1; // Invalid parameters
+		return -1;
 	}
 
-	uint8_t root_dir_block[BLOCK_SIZE];
-	if (block_read(sb.root_index, root_dir_block) == -1)
-	{
-		return -1; // Failed to read root directory
-	}
-
-	int file_rdir_index = -1;
-	uint8_t *file_entry_ptr = NULL;
-
+	// Search for the file in the root directory
+	int file_index = -1;
 	for (int i = 0; i < FS_FILE_MAX_COUNT; i++)
 	{
-		uint8_t *current_entry = root_dir_block + (i * RDIR_ENTRY_SIZE);
-
-		if (current_entry[FILENAME_OFFSET] != '\0' &&
-			strncmp((char *)(current_entry + FILENAME_OFFSET), filename, FS_FILENAME_LEN) == 0)
+		if (strcmp(rd_table[i].filename, filename) == 0)
 		{
-			file_rdir_index = i;
-			file_entry_ptr = current_entry;
+			file_index = i;
 			break;
 		}
 	}
 
-	if (file_rdir_index == -1)
+	if (file_index == -1)
 	{
 		return -1; // File not found
 	}
 
-	// Check if the file is open
-	for (int i = 0; i < FS_FILE_MAX_COUNT; i++)
+	// Check if the file is currently open
+	for (int i = 0; i < FS_OPEN_MAX_COUNT; i++)
 	{
-		if (fd_table[i].active && fd_table[i].entry_index == file_rdir_index)
+		if (fd_table[i].active && fd_table[i].entry_index == file_index)
 		{
 			return -1; // File is currently open
 		}
 	}
 
-	uint16_t current_block = read_le16(file_entry_ptr + FIRST_BLOCK_OFFSET);
+	// Free all FAT blocks associated with the file
+	uint16_t current_block = rd_table[file_index].index;
 
-	if (current_block != FAT_EOC)
+	while (current_block != FAT_EOC)
 	{
-		uint8_t fat_buf[BLOCK_SIZE];
+		uint16_t next_block = fat_buffer[current_block];
+		fat_buffer[current_block] = 0; // Mark the current FAT entry as free
+		current_block = next_block;
+	}
 
-		int fat_block_modified[sb.fat_blocks];
-		for (int i = 0; i < sb.fat_blocks; i++)
+	// Clear the root directory entry
+	rd_table[file_index].filename[0] = '\0';
+	rd_table[file_index].size = 0;
+	rd_table[file_index].index = FAT_EOC;
+	memset(rd_table[file_index].padding, 0, sizeof(rd_table[file_index].padding));
+
+	// Write updated FAT back to disk
+	for (int i = 0; i < sb.fat_blocks; i++)
+	{
+		if (block_write(1 + i, &fat_buffer[i * (BLOCK_SIZE / sizeof(uint16_t))]) == -1)
 		{
-			fat_block_modified[i] = 0;
-		}
-
-		// Read all FAT blocks into buffer
-		for (int i = 0; i < sb.fat_blocks; i++)
-		{
-			if (block_read(1 + i, fat_buf + (i * BLOCK_SIZE)) == -1)
-			{
-				return -1; // Failed to read FAT block
-			}
-		}
-
-		while (current_block != FAT_EOC && current_block < sb.datablock_count)
-		{
-			uint16_t next_block = get_fat_entry_from_buffer(fat_buf, current_block);
-
-			// Mark the FAT entry as free
-			set_fat_entry_in_buffer(fat_buf, current_block, 0);
-
-			int fat_block_array = (current_block * 2) / BLOCK_SIZE;
-			if (fat_block_array < sb.fat_blocks)
-			{
-				fat_block_modified[fat_block_array] = 1;
-			}
-
-			// Find the next block in the chain
-			if (next_block == current_block)
-			{
-				break; // Prevent infinite loop if next block points to itself
-			}
-
-			current_block = next_block;
-		}
-
-		for (int i = 0; i < sb.fat_blocks; i++)
-		{
-			if (fat_block_modified[i])
-			{
-				if (block_write(1 + i, fat_buf + (i * BLOCK_SIZE)) == -1)
-				{
-					return -1; // Failed to write FAT block
-				}
-			}
+			return -1;
 		}
 	}
 
-	// Mark the entry as free
-	file_entry_ptr[FILENAME_OFFSET] = '\0';
-
-	// Set file size to 0
-	write_le32(file_entry_ptr + FILESIZE_OFFSET, 0);
-
-	// set first block to FAT_EOC
-	write_le16(file_entry_ptr + FIRST_BLOCK_OFFSET, FAT_EOC);
-
-	// Write the modified root directory block back to disk
-	if (block_write(sb.root_index, root_dir_block) == -1)
+	// Write updated root directory back to disk
+	if (block_write(sb.root_index, rd_table) == -1)
 	{
-		return -1; // Failed to write back to root directory
+		return -1;
 	}
 
 	return 0; // File deleted successfully
@@ -422,44 +352,29 @@ int fs_delete(const char *filename)
 /* List files in the filesystem */
 int fs_ls(void)
 {
+	// Check if filesystem is mounted
 	if (!is_mounted)
 	{
 		return -1;
 	}
 
-	uint8_t root_dir_block[BLOCK_SIZE];
-	if (block_read(sb.root_index, root_dir_block) == -1)
-	{
-		return -1; // Failed to read root directory
-	}
-
 	// Print header
 	printf("FS Ls:\n");
 
-	// Iterate through all possible file entries
+	// Iterate through all possible file entries in rd_table
 	for (int i = 0; i < FS_FILE_MAX_COUNT; i++)
 	{
-		uint8_t *entry_ptr = root_dir_block + (i * RDIR_ENTRY_SIZE);
-
-		// Skip if entry is empty (first byte is NULL)
-		if (entry_ptr[FILENAME_OFFSET] == '\0')
+		// Skip empty entries (first byte of filename is NULL)
+		if (rd_table[i].filename[0] == '\0')
 		{
 			continue;
 		}
 
-		// Get filename (null-terminated string)
-		char filename[FS_FILENAME_LEN];
-		memcpy(filename, entry_ptr + FILENAME_OFFSET, FS_FILENAME_LEN);
-		filename[FS_FILENAME_LEN - 1] = '\0';
-
-		// Get file size
-		uint32_t file_size = read_le32(entry_ptr + FILESIZE_OFFSET);
-
-		// Print file information
+		// Print file information directly from struct
 		printf("file: %s, size: %u, data_blk: %u\n",
-			   filename,
-			   file_size,
-			   read_le16(entry_ptr + FIRST_BLOCK_OFFSET));
+			   rd_table[i].filename,
+			   rd_table[i].size,
+			   rd_table[i].index);
 	}
 
 	return 0;
@@ -468,72 +383,43 @@ int fs_ls(void)
 /* Open file by giving it a file descriptor */
 int fs_open(const char *filename)
 {
-	// Check if disk is mounted
-	if (is_mounted == 0)
-	{
+	// Check if filesystem is mounted
+	if (!is_mounted)
 		return -1;
-	}
 
-	// Check filename is valid
-	if (filename == NULL || strlen(filename) > 15)
-	{
+	// Validate filename
+	if (filename == NULL || strlen(filename) == 0 || strlen(filename) >= FS_FILENAME_LEN)
 		return -1;
-	}
 
-	// Read root directory to get latest state
-	uint8_t root_dir_block[BLOCK_SIZE];
-	if (block_read(sb.root_index, root_dir_block) == -1)
-	{
-		return -1;
-	}
-
-	// Iterate through root directory, stop if there is a match
+	// Search for the file in the in-memory root directory table
 	int rd_index = -1;
 	for (int i = 0; i < FS_FILE_MAX_COUNT; i++)
 	{
-		uint8_t *entry_ptr = root_dir_block + (i * RDIR_ENTRY_SIZE);
-		
-		// Skip empty entries
-		if (entry_ptr[FILENAME_OFFSET] == '\0')
-		{
-			continue;
-		}
-
-		// Compare filenames
-		if (strncmp((char *)(entry_ptr + FILENAME_OFFSET), filename, FS_FILENAME_LEN) == 0)
+		if (strcmp(rd_table[i].filename, filename) == 0)
 		{
 			rd_index = i;
 			break;
 		}
 	}
 
-	// Check to see if rd_index has been changed. If not, file wasn't found.
+	// If file not found, return error
 	if (rd_index == -1)
-	{
 		return -1;
-	}
 
-	// Find inactive file descriptor and use it
-	int fd = -1;
+	// Search for a free file descriptor slot
 	for (int i = 0; i < FS_OPEN_MAX_COUNT; i++)
 	{
-		if (fd_table[i].active == 0)
+		if (!fd_table[i].active)
 		{
 			fd_table[i].active = 1;
 			fd_table[i].entry_index = rd_index;
 			fd_table[i].offset = 0;
-			fd = i;
-			break;
+			return i;
 		}
 	}
 
-	// Check to see if no file descriptor was found
-	if (fd == -1)
-	{
-		return -1;
-	}
-
-	return fd;
+	// No free file descriptor available
+	return -1;
 }
 
 /* Close file descriptor */
@@ -626,172 +512,137 @@ int fs_write(int fd, void *buf, size_t count)
 {
 	// Input validation
 	if (!is_mounted || !buf)
-	{
 		return -1;
-	}
 
-	// Validate file descriptor
 	if (fd < 0 || fd >= FS_OPEN_MAX_COUNT || !fd_table[fd].active)
-	{
 		return -1;
-	}
 
-	// Read root directory to get file info
-	uint8_t root_dir_block[BLOCK_SIZE];
-	if (block_read(sb.root_index, root_dir_block) == -1)
+	int entry_index = fd_table[fd].entry_index;
+	uint32_t file_size = rd_table[entry_index].size;
+	uint32_t current_offset = fd_table[fd].offset;
+
+	// Don't allow writing beyond maximum file size (optional, depending on your spec)
+	if (current_offset + count > BLOCK_SIZE * sb.datablock_count)
+		count = BLOCK_SIZE * sb.datablock_count - current_offset;
+
+	// Calculate how many bytes we can actually write
+	if (count == 0)
+		return 0;
+
+	// Walk FAT chain to current block (or allocate blocks as needed)
+	uint16_t current_block = rd_table[entry_index].index;
+
+	// If file has no blocks yet, allocate the first block
+	if (current_block == FAT_EOC)
 	{
-		return -1;
-	}
-
-	// Get file entry pointer
-	uint8_t *entry_ptr = root_dir_block + (fd_table[fd].entry_index * RDIR_ENTRY_SIZE);
-	uint16_t first_block = read_le16(entry_ptr + FIRST_BLOCK_OFFSET);
-	uint32_t file_size = read_le32(entry_ptr + FILESIZE_OFFSET);
-	size_t current_offset = fd_table[fd].offset;
-
-	// Read FAT blocks into memory
-	uint8_t fat_buf[sb.fat_blocks * BLOCK_SIZE];
-	for (int i = 0; i < sb.fat_blocks; i++)
-	{
-		if (block_read(1 + i, fat_buf + (i * BLOCK_SIZE)) == -1)
+		// Find a free block
+		int new_block = -1;
+		for (int i = 0; i < sb.datablock_count; i++)
 		{
-			return -1;
-		}
-	}
-
-	// Calculate starting block and offset within block
-	uint16_t current_block = first_block;
-	size_t blocks_to_skip = current_offset / BLOCK_SIZE;
-	size_t offset_in_block = current_offset % BLOCK_SIZE;
-
-	// Skip to the correct block
-	for (size_t i = 0; i < blocks_to_skip && current_block != FAT_EOC; i++)
-	{
-		current_block = get_fat_entry_from_buffer(fat_buf, current_block);
-	}
-
-	// If we need a new block chain
-	if (current_block == FAT_EOC && count > 0)
-	{
-		// Find first free block
-		uint16_t new_block = 0;
-		for (new_block = 1; new_block < sb.datablock_count; new_block++)
-		{
-			if (get_fat_entry_from_buffer(fat_buf, new_block) == 0)
+			if (fat_buffer[i] == 0)
+			{
+				new_block = i;
 				break;
+			}
 		}
 
-		if (new_block >= sb.datablock_count)
-		{
-			return -1; // No free blocks available
-		}
+		if (new_block == -1)
+			return 0; // Disk full
 
-		// Update FAT and file entry if this is the first block
-		if (first_block == FAT_EOC)
-		{
-			first_block = new_block;
-			write_le16(entry_ptr + FIRST_BLOCK_OFFSET, new_block);
-		}
-		else
-		{
-			// Link the last block to the new block
-			set_fat_entry_in_buffer(fat_buf, current_block, new_block);
-		}
+		// Allocate new block
+		fat_buffer[new_block] = FAT_EOC;
+		rd_table[entry_index].index = new_block;
 		current_block = new_block;
-		set_fat_entry_in_buffer(fat_buf, new_block, FAT_EOC);
 	}
 
-	// Write data block by block
+	// Skip blocks according to current offset
+	uint32_t blocks_to_skip = current_offset / BLOCK_SIZE;
+	uint32_t offset_in_block = current_offset % BLOCK_SIZE;
+
+	for (uint32_t i = 0; i < blocks_to_skip; i++)
+	{
+		if (fat_buffer[current_block] == FAT_EOC)
+		{
+			// Allocate new block if needed
+			int new_block = -1;
+			for (int j = 0; j < sb.datablock_count; j++)
+			{
+				if (fat_buffer[j] == 0)
+				{
+					new_block = j;
+					break;
+				}
+			}
+
+			if (new_block == -1)
+				return i * BLOCK_SIZE; // Partial write if disk full
+
+			fat_buffer[current_block] = new_block;
+			fat_buffer[new_block] = FAT_EOC;
+		}
+
+		current_block = fat_buffer[current_block];
+	}
+
+	// Now perform the actual writing
 	size_t bytes_written = 0;
 	uint8_t block_buf[BLOCK_SIZE];
 
-	while (bytes_written < count && current_block != FAT_EOC)
+	while (bytes_written < count)
 	{
-		// Read current block if we're not writing a full block
-		if (offset_in_block > 0 || (count - bytes_written) < BLOCK_SIZE)
-		{
-			if (block_read(sb.start_index + current_block, block_buf) == -1)
-			{
-				break;
-			}
-		}
-
-		// Calculate how much we can write in this block
-		size_t block_space = BLOCK_SIZE - offset_in_block;
-		size_t bytes_to_write = (count - bytes_written) < block_space ? (count - bytes_written) : block_space;
-
-		// Copy data to block buffer
-		memcpy(block_buf + offset_in_block,
-			   (uint8_t *)buf + bytes_written,
-			   bytes_to_write);
-
-		// Write block back to disk
-		if (block_write(sb.start_index + current_block, block_buf) == -1)
-		{
+		// Read current block
+		if (block_read(sb.start_index + current_block, block_buf) == -1)
 			break;
-		}
 
-		bytes_written += bytes_to_write;
+		// Calculate how much to write into this block
+		size_t block_space = BLOCK_SIZE - offset_in_block;
+		size_t write_now = (count - bytes_written < block_space) ? (count - bytes_written) : block_space;
+
+		memcpy(block_buf + offset_in_block, (uint8_t *)buf + bytes_written, write_now);
+
+		if (block_write(sb.start_index + current_block, block_buf) == -1)
+			break;
+
+		bytes_written += write_now;
 		offset_in_block = 0;
 
-		// If we need another block
 		if (bytes_written < count)
 		{
-			uint16_t next_block = get_fat_entry_from_buffer(fat_buf, current_block);
-			if (next_block == FAT_EOC)
+			// Need to move to next block
+			if (fat_buffer[current_block] == FAT_EOC)
 			{
-				// Find a new block
-				uint16_t new_block = 0;
-				for (new_block = 1; new_block < sb.datablock_count; new_block++)
+				// Allocate new block
+				int new_block = -1;
+				for (int j = 0; j < sb.datablock_count; j++)
 				{
-					if (get_fat_entry_from_buffer(fat_buf, new_block) == 0)
+					if (fat_buffer[j] == 0)
+					{
+						new_block = j;
 						break;
+					}
 				}
 
-				if (new_block >= sb.datablock_count)
-				{
-					break; // No more free blocks
-				}
+				if (new_block == -1)
+					break;
 
-				// Update FAT
-				set_fat_entry_in_buffer(fat_buf, current_block, new_block);
-				set_fat_entry_in_buffer(fat_buf, new_block, FAT_EOC);
-				current_block = new_block;
+				fat_buffer[current_block] = new_block;
+				fat_buffer[new_block] = FAT_EOC;
 			}
-			else
-			{
-				current_block = next_block;
-			}
-		}
-	}
 
-	// Update FAT blocks
-	for (int i = 0; i < sb.fat_blocks; i++)
-	{
-		if (block_write(1 + i, fat_buf + (i * BLOCK_SIZE)) == -1)
-		{
-			return -1;
+			current_block = fat_buffer[current_block];
 		}
-	}
-
-	// Update file size if necessary
-	size_t new_file_size = current_offset + bytes_written;
-	if (new_file_size > file_size)
-	{
-		write_le32(entry_ptr + FILESIZE_OFFSET, new_file_size);
-		if (block_write(sb.root_index, root_dir_block) == -1)
-		{
-			return -1;
-		}
-		// Update in-memory root directory table
-		rd_table[fd_table[fd].entry_index].size = new_file_size;
 	}
 
 	// Update file offset
 	fd_table[fd].offset += bytes_written;
 
+	// Update file size if needed
+	if (fd_table[fd].offset > file_size)
+		rd_table[entry_index].size = fd_table[fd].offset;
+
 	return bytes_written;
 }
+
 
 /* Read from file */
 int fs_read(int fd, void *buf, size_t count)
@@ -808,17 +659,10 @@ int fs_read(int fd, void *buf, size_t count)
 		return -1;
 	}
 
-	// Read root directory to get file info
-	uint8_t root_dir_block[BLOCK_SIZE];
-	if (block_read(sb.root_index, root_dir_block) == -1)
-	{
-		return -1;
-	}
-
-	// Get file entry pointer
-	uint8_t *entry_ptr = root_dir_block + (fd_table[fd].entry_index * RDIR_ENTRY_SIZE);
-	uint16_t first_block = read_le16(entry_ptr + FIRST_BLOCK_OFFSET);
-	uint32_t file_size = read_le32(entry_ptr + FILESIZE_OFFSET);
+	// Get file entry directly from in-memory root directory
+	int entry_index = fd_table[fd].entry_index;
+	uint16_t first_block = rd_table[entry_index].index;
+	uint32_t file_size = rd_table[entry_index].size;
 	size_t current_offset = fd_table[fd].offset;
 
 	// Check if we're trying to read past EOF
@@ -833,25 +677,15 @@ int fs_read(int fd, void *buf, size_t count)
 		count = file_size - current_offset;
 	}
 
-	// Read FAT blocks into memory
-	uint8_t fat_buf[sb.fat_blocks * BLOCK_SIZE];
-	for (int i = 0; i < sb.fat_blocks; i++)
-	{
-		if (block_read(1 + i, fat_buf + (i * BLOCK_SIZE)) == -1)
-		{
-			return -1;
-		}
-	}
-
 	// Calculate starting block and offset within block
 	uint16_t current_block = first_block;
 	size_t blocks_to_skip = current_offset / BLOCK_SIZE;
 	size_t offset_in_block = current_offset % BLOCK_SIZE;
 
-	// Skip to the correct block
+	// Walk FAT to the correct starting block
 	for (size_t i = 0; i < blocks_to_skip && current_block != FAT_EOC; i++)
 	{
-		current_block = get_fat_entry_from_buffer(fat_buf, current_block);
+		current_block = fat_buffer[current_block];
 	}
 
 	// Read data block by block
@@ -860,28 +694,26 @@ int fs_read(int fd, void *buf, size_t count)
 
 	while (bytes_read < count && current_block != FAT_EOC)
 	{
-		// Read current block
+		// Read current data block from disk
 		if (block_read(sb.start_index + current_block, block_buf) == -1)
 		{
 			break;
 		}
 
-		// Calculate how much we can read from this block
+		// Calculate how much to read from this block
 		size_t block_space = BLOCK_SIZE - offset_in_block;
-		size_t bytes_to_read = (count - bytes_read) < block_space ? (count - bytes_read) : block_space;
+		size_t bytes_to_read = (count - bytes_read < block_space) ? (count - bytes_read) : block_space;
 
 		// Copy data from block buffer to user buffer
-		memcpy((uint8_t *)buf + bytes_read,
-			   block_buf + offset_in_block,
-			   bytes_to_read);
+		memcpy((uint8_t *)buf + bytes_read, block_buf + offset_in_block, bytes_to_read);
 
 		bytes_read += bytes_to_read;
-		offset_in_block = 0;
+		offset_in_block = 0; // Only applies for first block
 
-		// Move to next block if we need more data
+		// Move to next block if more data is needed
 		if (bytes_read < count)
 		{
-			current_block = get_fat_entry_from_buffer(fat_buf, current_block);
+			current_block = fat_buffer[current_block];
 		}
 	}
 
