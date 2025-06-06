@@ -55,54 +55,14 @@ static uint16_t *fat_buffer = NULL;
 #define FILESIZE_OFFSET 16
 #define FIRST_BLOCK_OFFSET 20
 
-// Helper function to read a 16-bit little-endian value from a byte buffer
-// static uint16_t read_le16(const uint8_t *buffer)
-// {
-// 	return (uint16_t)buffer[0] | ((uint16_t)buffer[1] << 8);
-// }
-
-// // Helper function to write a 16-bit value to a byte buffer in little-endian
-// static void write_le16(uint8_t *buffer, uint16_t value)
-// {
-// 	buffer[0] = (uint8_t)(value & 0xFF);
-// 	buffer[1] = (uint8_t)((value >> 8) & 0xFF);
-// }
-
-// Helper function to read a 32-bit little-endian value from a byte buffer
-// static uint32_t read_le32(const uint8_t *buffer)
-// {
-// 	return (uint32_t)buffer[0] |
-// 		   ((uint32_t)buffer[1] << 8) |
-// 		   ((uint32_t)buffer[2] << 16) |
-// 		   ((uint32_t)buffer[3] << 24);
-// }
-// // Helper function to write a 32-bit value to a byte buffer in little-endian
-// static void write_le32(uint8_t *buffer, uint32_t value)
-// {
-// 	buffer[0] = (uint8_t)(value & 0xFF);
-// 	buffer[1] = (uint8_t)((value >> 8) & 0xFF);
-// 	buffer[2] = (uint8_t)((value >> 16) & 0xFF);
-// 	buffer[3] = (uint8_t)((value >> 24) & 0xFF);
-// }
-
-// Helper to get a FAT entry from the in-memory FAT buffer
-// static uint16_t get_fat_entry_from_buffer(const uint8_t *fat_main_buffer, uint16_t index)
-// {
-// 	// Each FAT entry is 2 bytes
-// 	const uint8_t *p = fat_main_buffer + (index * 2);
-// 	return read_le16(p);
-// }
-
-// // Helper to set a FAT entry in the in-memory FAT buffer
-// static void set_fat_entry_in_buffer(uint8_t *fat_main_buffer, uint16_t index, uint16_t value)
-// {
-// 	uint8_t *p = fat_main_buffer + (index * 2);
-// 	write_le16(p, value);
-// }
-
 /* Mounts a specified filesystem */
 int fs_mount(const char *diskname)
 {
+	// Check if disk is already mounted
+	if (is_mounted) {
+		return -1;
+	}
+
 	// Attempt to open disk, return -1 on failure
 	if (block_disk_open(diskname) < 0)
 	{
@@ -112,36 +72,46 @@ int fs_mount(const char *diskname)
 	// Attempt to read disk with superblock as buffer, return -1 on failure
 	if (block_read(0, &sb) < 0)
 	{
+		block_disk_close();
 		return -1;
 	}
 
-	// Check to see if signature is "ECS150FS", return -1 on failure
-	if (memcmp(sb.signature, "ECS150FS", 8) != 0)
+	// Check to see if signature is "ECS150FS" and that total block count is accurate, return -1 on failure
+	if (memcmp(sb.signature, "ECS150FS", 8) != 0 || block_disk_count() != sb.total_blocks)
 	{
+		block_disk_close();
 		return -1;
 	}
 
-	// Check that total block count is accurate, return -1 on failure
-	if (block_disk_count() != sb.total_blocks)
-	{
-		return -1;
-	}
-
-	// Load root directory
+	// Load root directory into memory
 	if (block_read(sb.root_index, rd_table) < 0)
 	{
+		block_disk_close();
 		return -1;
+	}
+
+	// Allocate FAT buffer
+	if (fat_buffer != NULL)
+	{
+		free(fat_buffer);
+		fat_buffer = NULL;
 	}
 
 	// Set size of fat buffer
-	fat_buffer = malloc(sb.datablock_count * sizeof(uint16_t));
+	fat_buffer = malloc(sb.datablock_count * BLOCK_SIZE);
 	if (fat_buffer == NULL) {
+		block_disk_close();
 		return -1;
 	}
 
-	// Load FAT from disk into fat_buffer
-	for (int i = 0; i < sb.fat_blocks; i++) {
-		if (block_read(1 + i, (void *)(((uint8_t *)fat_buffer) + (i * BLOCK_SIZE))) < 0) {
+	// Load FAT blocks into memory
+	for (int i = 0; i < sb.fat_blocks; i++)
+	{
+		if (block_read(1 + i, (uint8_t *)fat_buffer + i * BLOCK_SIZE) < 0)
+		{
+			free(fat_buffer);
+			fat_buffer = NULL;
+			block_disk_close();
 			return -1;
 		}
 	}
@@ -167,16 +137,24 @@ int fs_umount(void)
 		return -1;
 	}
 
+	// Write back FAT
+	for (int i = 0; i < sb.fat_blocks; i++)
+	{
+		if (block_write(1 + i, (uint8_t *)fat_buffer + i * BLOCK_SIZE) < 0)
+			return -1;
+	}
+
+	// Free memory used for fat buffer
+	if (fat_buffer != NULL) {
+		free(fat_buffer);
+		fat_buffer = NULL;
+	}
+
 	// Attempt to close disk, return -1 on failure
 	if (block_disk_close() < 0)
 	{
 		return -1;
 	}
-
-	// Free memory used for fat buffer
-	free(fat_buffer);
-	fat_buffer = NULL;
-
 
 	// Mark disk as unmounted
 	is_mounted = 0;
@@ -334,7 +312,7 @@ int fs_delete(const char *filename)
 	// Write updated FAT back to disk
 	for (int i = 0; i < sb.fat_blocks; i++)
 	{
-		if (block_write(1 + i, &fat_buffer[i * (BLOCK_SIZE / sizeof(uint16_t))]) == -1)
+		if (block_write(1 + i, ((uint8_t*)fat_buffer) + i * BLOCK_SIZE) == -1)
 		{
 			return -1;
 		}
