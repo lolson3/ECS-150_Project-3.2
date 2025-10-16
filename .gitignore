@@ -1,0 +1,85 @@
+
+# ===============================
+# C / Make / Toolchain
+# ===============================
+*.o
+*.a
+*.so
+*.dylib
+*.dll
+*.exe
+*.out
+*.obj
+*.lib
+*.ilk
+*.pdb
+*.exp
+*.mod*
+*.cmd
+*.map
+
+# Linker, build, and dependency files
+*.d
+*.gcno
+*.gcda
+*.gcov
+*.gch
+*.pch
+
+# Generated binaries and build dirs
+/build/
+/bin/
+/dist/
+/out/
+/target/
+/.debug/
+/release/
+/.deps/
+/.depends/
+/.ccls-cache/
+/compile_commands.json
+
+# ===============================
+# Project Artifacts
+# ===============================
+# Virtual disk images and test data
+*.img
+*.vdi
+*.vhd
+*.iso
+*.bin
+*.dat
+*.tmp
+*.log
+*.trace
+*.core
+core
+vgcore.*
+*.stackdump
+
+# Tool outputs
+tests/report/
+tests/*.xml
+tests/*.tap
+
+# ===============================
+# IDE / Editor
+# ===============================
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+
+# ===============================
+# OS
+# ===============================
+.DS_Store
+Thumbs.db
+
+# ===============================
+# Misc
+# ===============================
+*.swp
+*.swo
+*.bak
+*~
